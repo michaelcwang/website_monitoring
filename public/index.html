@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Website Health Monitor</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Website Health Monitor</p>
+          <h1>Recovery alerts for maintenance-mode sites</h1>
+        </div>
+        <div class="email-tools">
+          <div id="smtp-status" class="smtp-status">Checking email setup...</div>
+          <button id="test-email" type="button">Send test email</button>
+        </div>
+      </header>
+
+      <section class="panel">
+        <form id="site-form" class="site-form">
+          <label>
+            <span>Name</span>
+            <input name="name" placeholder="LISD Canvas">
+          </label>
+          <label class="wide">
+            <span>Website URL</span>
+            <input name="url" type="url" required placeholder="https://lisdtx.instructure.com/login/canvas">
+          </label>
+          <label>
+            <span>Interval</span>
+            <select name="intervalMs">
+              <option value="300000">5 minutes</option>
+              <option value="600000" selected>10 minutes</option>
+              <option value="900000">15 minutes</option>
+              <option value="1800000">30 minutes</option>
+            </select>
+          </label>
+          <label class="wide">
+            <span>Maintenance keywords</span>
+            <input name="maintenanceKeywords" value="maintenance, temporarily unavailable, scheduled maintenance">
+          </label>
+          <button type="submit">Add monitor</button>
+        </form>
+      </section>
+
+      <section class="toolbar">
+        <h2>Monitored websites</h2>
+        <button id="refresh" type="button">Refresh</button>
+      </section>
+
+      <section id="sites" class="sites" aria-live="polite"></section>
+    </main>
+
+    <template id="site-template">
+      <article class="site-card">
+        <div class="site-card__header">
+          <div>
+            <h3></h3>
+            <a target="_blank" rel="noreferrer"></a>
+          </div>
+          <span class="badge"></span>
+        </div>
+        <dl class="details">
+          <div>
+            <dt>Last checked</dt>
+            <dd data-field="lastCheckedAt">Never</dd>
+          </div>
+          <div>
+            <dt>HTTP</dt>
+            <dd data-field="statusCode">Unknown</dd>
+          </div>
+          <div>
+            <dt>Interval</dt>
+            <dd data-field="interval">10 minutes</dd>
+          </div>
+          <div>
+            <dt>Alerts</dt>
+            <dd data-field="alerts">Enabled</dd>
+          </div>
+        </dl>
+        <p class="message"></p>
+        <div class="actions">
+          <button type="button" data-action="check">Check now</button>
+          <button type="button" data-action="toggle-enabled"></button>
+          <button type="button" data-action="toggle-alerts"></button>
+          <button type="button" data-action="acknowledge">Stop alerts</button>
+          <button type="button" data-action="delete" class="danger">Delete</button>
+        </div>
+      </article>
+    </template>
+
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>
