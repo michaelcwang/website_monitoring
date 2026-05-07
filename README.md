@@ -8,6 +8,7 @@ A small dependency-free Node app that checks configured websites on an interval 
 - Lets you add more websites from the browser UI.
 - Checks each site about every 10 minutes by default.
 - Treats a site as recovered when it returns an expected HTTP status and the response body no longer contains configured maintenance keywords.
+- Validates HTTPS certificates, hostname matching, issuer details, fingerprints, and expiration dates.
 - Sends one recovery email, then automatically pauses alerts for that site.
 - Lets you pause checks, pause alerts, manually check now, or delete a monitor.
 - Supports admin-token protection, public-hostname checks, domain allowlists, rate limiting, check jitter, recovery confirmation, and email cooldowns.

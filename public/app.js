@@ -87,6 +87,7 @@ function renderSites() {
     node.querySelector('[data-field="statusCode"]').textContent = site.statusCode || "Unknown";
     node.querySelector('[data-field="interval"]').textContent = formatInterval(site.intervalMs);
     node.querySelector('[data-field="alerts"]').textContent = site.alertsEnabled ? "Enabled" : "Paused";
+    renderCertificate(node, site.tlsCertificate);
 
     const message = node.querySelector(".message");
     message.textContent = site.lastError || statusCopy(site);
@@ -160,6 +161,52 @@ function statusCopy(site) {
   if (site.status === "maintenance") return "The page is reachable but still appears to show maintenance content.";
   if (site.status === "down") return "The last check failed or returned a status outside the expected range.";
   return "Waiting for the first check.";
+}
+
+function renderCertificate(node, certificate) {
+  const statusEl = node.querySelector('[data-field="tlsStatus"]');
+  const hostEl = node.querySelector('[data-field="tlsHost"]');
+  const expiresEl = node.querySelector('[data-field="tlsExpiration"]');
+  const subjectEl = node.querySelector('[data-field="tlsSubject"]');
+  const issuerEl = node.querySelector('[data-field="tlsIssuer"]');
+  const fingerprintEl = node.querySelector('[data-field="tlsFingerprint"]');
+
+  if (!certificate) {
+    statusEl.textContent = "Certificate pending";
+    statusEl.className = "";
+    hostEl.textContent = "";
+    expiresEl.textContent = "Unknown";
+    subjectEl.textContent = "Unknown";
+    issuerEl.textContent = "Unknown";
+    fingerprintEl.textContent = "Unknown";
+    return;
+  }
+
+  if (certificate.status === "not_applicable") {
+    statusEl.textContent = "No HTTPS certificate";
+    statusEl.className = "warning";
+    hostEl.textContent = certificate.host || "";
+    expiresEl.textContent = "Not HTTPS";
+    subjectEl.textContent = "Not applicable";
+    issuerEl.textContent = "Not applicable";
+    fingerprintEl.textContent = "Not applicable";
+    return;
+  }
+
+  const warning = certificate.status === "valid" && certificate.daysUntilExpiration <= 30;
+  statusEl.textContent = certificate.status === "valid"
+    ? warning
+      ? "Certificate expiring soon"
+      : "Certificate valid"
+    : "Certificate invalid";
+  statusEl.className = certificate.status === "valid" ? (warning ? "warning" : "valid") : "invalid";
+  hostEl.textContent = certificate.host || "";
+  expiresEl.textContent = certificate.validTo
+    ? `${formatDate(certificate.validTo)} (${certificate.daysUntilExpiration} days)`
+    : "Unknown";
+  subjectEl.textContent = certificate.subject || "Unknown";
+  issuerEl.textContent = certificate.issuer || "Unknown";
+  fingerprintEl.textContent = certificate.fingerprint256 || "Unknown";
 }
 
 function formatDate(value) {

@@ -242,7 +242,7 @@ button.danger {
 
 .details {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 12px;
   margin: 18px 0 10px;
 }
@@ -262,6 +262,40 @@ dt {
 dd {
   margin: 3px 0 0;
   overflow-wrap: anywhere;
+}
+
+.certificate {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  margin: 14px 0;
+  padding: 12px;
+  background: #fbfcfa;
+}
+
+.certificate > div:first-child {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.certificate strong.valid {
+  color: var(--accent-dark);
+}
+
+.certificate strong.warning {
+  color: var(--warn);
+}
+
+.certificate strong.invalid {
+  color: var(--danger);
+}
+
+.certificate dl {
+  display: grid;
+  grid-template-columns: 1fr 1fr 2fr;
+  gap: 12px;
+  margin: 0;
 }
 
 .message {
@@ -291,7 +325,8 @@ dd {
   }
 
   .site-form,
-  .details {
+  .details,
+  .certificate dl {
     grid-template-columns: 1fr;
   }
 

@@ -81,7 +81,31 @@
             <dt>Alerts</dt>
             <dd data-field="alerts">Enabled</dd>
           </div>
+          <div>
+            <dt>SSL expires</dt>
+            <dd data-field="tlsExpiration">Unknown</dd>
+          </div>
         </dl>
+        <div class="certificate">
+          <div>
+            <strong data-field="tlsStatus">Certificate pending</strong>
+            <span data-field="tlsHost"></span>
+          </div>
+          <dl>
+            <div>
+              <dt>Subject</dt>
+              <dd data-field="tlsSubject">Unknown</dd>
+            </div>
+            <div>
+              <dt>Issuer</dt>
+              <dd data-field="tlsIssuer">Unknown</dd>
+            </div>
+            <div>
+              <dt>Fingerprint</dt>
+              <dd data-field="tlsFingerprint">Unknown</dd>
+            </div>
+          </dl>
+        </div>
         <p class="message"></p>
         <div class="actions">
           <button type="button" data-action="check">Check now</button>

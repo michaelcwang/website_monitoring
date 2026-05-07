@@ -19,6 +19,7 @@ const PUBLIC_DIR = path.join(__dirname, "public");
 const DEFAULT_INTERVAL_MS = 10 * 60 * 1000;
 const MIN_INTERVAL_MS = Number(process.env.MIN_INTERVAL_MS || 5 * 60 * 1000);
 const CHECK_TIMEOUT_MS = 20 * 1000;
+const TLS_CHECK_TIMEOUT_MS = 10 * 1000;
 const MAX_RESPONSE_BYTES = 250_000;
 const MAX_SITES = Number(process.env.MAX_SITES || 25);
 const ALERT_COOLDOWN_MS = Number(process.env.ALERT_COOLDOWN_MS || 24 * 60 * 60 * 1000);
@@ -290,6 +291,7 @@ async function normalizeSite(input) {
     acknowledgedAt: null,
     consecutiveUpChecks: 0,
     pendingRecoverySince: null,
+    tlsCertificate: null,
     createdAt: now,
     updatedAt: now
   };
@@ -440,6 +442,7 @@ async function runCheck(site, options = {}) {
   const checkedAt = new Date().toISOString();
 
   try {
+    const certificate = await inspectTlsCertificate(site.url);
     const result = await fetchSite(site);
     const nextStatus = classifyHealth(site, result);
     const consecutiveUpChecks = nextStatus === "up" ? Number(site.consecutiveUpChecks || 0) + 1 : 0;
@@ -453,6 +456,7 @@ async function runCheck(site, options = {}) {
     site.statusCode = result.statusCode;
     site.lastError = result.reason;
     site.lastCheckedAt = checkedAt;
+    site.tlsCertificate = certificate;
     site.consecutiveUpChecks = consecutiveUpChecks;
     site.pendingRecoverySince = pendingRecoverySince;
     if (previousStatus !== nextStatus) site.lastChangedAt = checkedAt;
@@ -474,6 +478,7 @@ async function runCheck(site, options = {}) {
     site.statusCode = null;
     site.lastError = error.message;
     site.lastCheckedAt = checkedAt;
+    if (error.certificate) site.tlsCertificate = error.certificate;
     site.consecutiveUpChecks = 0;
     site.pendingRecoverySince = null;
     if (previousStatus !== "down") site.lastChangedAt = checkedAt;
@@ -486,6 +491,98 @@ async function runCheck(site, options = {}) {
   if (options.manual) {
     console.log(`Manual check completed for ${site.name}: ${site.status}`);
   }
+}
+
+async function inspectTlsCertificate(siteUrl) {
+  const url = new URL(siteUrl);
+  if (url.protocol !== "https:") {
+    return {
+      status: "not_applicable",
+      host: url.hostname,
+      checkedAt: new Date().toISOString(),
+      error: "TLS certificate monitoring applies only to HTTPS URLs"
+    };
+  }
+
+  const certificate = await getPeerCertificate(url.hostname, Number(url.port || 443));
+  const identityError = tls.checkServerIdentity(url.hostname, certificate);
+  const validFrom = new Date(certificate.valid_from);
+  const validTo = new Date(certificate.valid_to);
+  const now = Date.now();
+  const daysUntilExpiration = Math.ceil((validTo.getTime() - now) / 86_400_000);
+  const expired = validTo.getTime() <= now;
+  const notYetValid = validFrom.getTime() > now;
+  const error = certificate.authorizationError
+    || identityError?.message
+    || (expired ? "Certificate is expired" : null)
+    || (notYetValid ? "Certificate is not valid yet" : null);
+
+  const summary = {
+    status: error ? "invalid" : "valid",
+    host: url.hostname,
+    subject: certificate.subject?.CN || null,
+    issuer: certificate.issuer?.CN || null,
+    subjectAltNames: parseSubjectAltNames(certificate.subjectaltname),
+    validFrom: validFrom.toISOString(),
+    validTo: validTo.toISOString(),
+    daysUntilExpiration,
+    fingerprint256: certificate.fingerprint256 || null,
+    serialNumber: certificate.serialNumber || null,
+    checkedAt: new Date().toISOString(),
+    error
+  };
+
+  if (error) {
+    const tlsError = new Error(`TLS certificate validation failed: ${error}`);
+    tlsError.certificate = summary;
+    throw tlsError;
+  }
+
+  return summary;
+}
+
+function getPeerCertificate(host, port) {
+  return new Promise((resolve, reject) => {
+    const socket = tls.connect({
+      host,
+      port,
+      servername: host,
+      rejectUnauthorized: false
+    });
+
+    const timeout = setTimeout(() => {
+      socket.destroy();
+      reject(new Error("TLS certificate check timed out"));
+    }, TLS_CHECK_TIMEOUT_MS);
+
+    socket.once("secureConnect", () => {
+      clearTimeout(timeout);
+      const certificate = socket.getPeerCertificate();
+      const authorizationError = socket.authorizationError || null;
+      socket.end();
+
+      if (!certificate || !certificate.raw) {
+        reject(new Error("No TLS certificate was presented"));
+        return;
+      }
+
+      resolve({ ...certificate, authorizationError });
+    });
+
+    socket.once("error", (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+  });
+}
+
+function parseSubjectAltNames(value) {
+  if (!value) return [];
+  return value
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.startsWith("DNS:"))
+    .map((entry) => entry.slice(4));
 }
 
 async function fetchSite(site) {
@@ -528,12 +625,16 @@ function shouldNotify(site) {
 }
 
 async function sendRecoveryEmail(site, result) {
+  const certificate = site.tlsCertificate;
   const subject = `${site.name} is back up`;
   const text = [
     `${site.name} appears to be back from maintenance.`,
     "",
     `URL: ${site.url}`,
     `HTTP status: ${result.statusCode}`,
+    certificate?.status === "valid"
+      ? `TLS certificate: valid until ${new Date(certificate.validTo).toLocaleString()} (${certificate.daysUntilExpiration} days remaining)`
+      : `TLS certificate: ${certificate?.error || certificate?.status || "not checked"}`,
     `Checked at: ${new Date().toLocaleString()}`,
     "",
     "Alerts for this site were automatically paused after this recovery notification unless repeat notifications are enabled."
