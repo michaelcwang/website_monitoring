@@ -85,10 +85,15 @@ h2 {
 .email-tools {
   display: grid;
   gap: 8px;
+  min-width: 240px;
 }
 
 .email-tools button {
   width: 100%;
+}
+
+.email-tools input {
+  min-height: 38px;
 }
 
 .smtp-status.ready {

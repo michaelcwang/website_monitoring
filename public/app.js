@@ -4,8 +4,14 @@ const form = document.querySelector("#site-form");
 const smtpStatus = document.querySelector("#smtp-status");
 const refreshButton = document.querySelector("#refresh");
 const testEmailButton = document.querySelector("#test-email");
+const adminTokenInput = document.querySelector("#admin-token");
 
 let sites = [];
+adminTokenInput.value = localStorage.getItem("adminToken") || "";
+
+adminTokenInput.addEventListener("change", () => {
+  localStorage.setItem("adminToken", adminTokenInput.value.trim());
+});
 
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -32,6 +38,7 @@ async function loadSites() {
   sites = data.sites;
   smtpStatus.textContent = data.smtpReady ? "Email alerts ready" : "Email setup missing";
   smtpStatus.className = `smtp-status ${data.smtpReady ? "ready" : "missing"}`;
+  adminTokenInput.hidden = !data.adminAuthEnabled;
   testEmailButton.disabled = !data.smtpReady;
   renderSites();
 }
@@ -124,13 +131,24 @@ async function deleteSite(id) {
 }
 
 async function request(url, options = {}) {
+  const headers = { "Content-Type": "application/json" };
+  const adminToken = localStorage.getItem("adminToken");
+  if (adminToken) headers["X-Admin-Token"] = adminToken;
+
   const response = await fetch(url, {
-    headers: { "Content-Type": "application/json" },
+    headers,
     ...options
   });
 
   if (!response.ok && response.status !== 204) {
     const data = await response.json().catch(() => ({}));
+    if (response.status === 401) {
+      const token = prompt("Enter admin token");
+      if (token) {
+        localStorage.setItem("adminToken", token.trim());
+        adminTokenInput.value = token.trim();
+      }
+    }
     throw new Error(data.error || "Request failed");
   }
 

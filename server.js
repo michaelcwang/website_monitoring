@@ -4,6 +4,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import net from "node:net";
 import tls from "node:tls";
+import dns from "node:dns/promises";
 import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -16,8 +17,21 @@ const DATA_DIR = path.join(__dirname, "data");
 const DATA_FILE = path.join(DATA_DIR, "sites.json");
 const PUBLIC_DIR = path.join(__dirname, "public");
 const DEFAULT_INTERVAL_MS = 10 * 60 * 1000;
-const MIN_INTERVAL_MS = 60 * 1000;
+const MIN_INTERVAL_MS = Number(process.env.MIN_INTERVAL_MS || 5 * 60 * 1000);
 const CHECK_TIMEOUT_MS = 20 * 1000;
+const MAX_RESPONSE_BYTES = 250_000;
+const MAX_SITES = Number(process.env.MAX_SITES || 25);
+const ALERT_COOLDOWN_MS = Number(process.env.ALERT_COOLDOWN_MS || 24 * 60 * 60 * 1000);
+const RECOVERY_CONFIRMATION_CHECKS = Number(process.env.RECOVERY_CONFIRMATION_CHECKS || 2);
+const ADMIN_TOKEN = process.env.ADMIN_TOKEN || "";
+const REQUIRE_AUTH_FOR_READS = process.env.REQUIRE_AUTH_FOR_READS === "true";
+const BLOCK_PRIVATE_NETWORKS = process.env.BLOCK_PRIVATE_NETWORKS !== "false";
+const ALLOWED_DOMAINS = parseCsv(process.env.ALLOWED_DOMAINS || "");
+const CHECK_USER_AGENT = process.env.CHECK_USER_AGENT || "WebsiteHealthMonitor/0.1 (+https://github.com/michaelcwang/website_monitoring)";
+const MUTATION_LIMIT = {
+  windowMs: Number(process.env.MUTATION_RATE_WINDOW_MS || 15 * 60 * 1000),
+  max: Number(process.env.MUTATION_RATE_MAX || 30)
+};
 
 const smtpConfig = {
   host: process.env.SMTP_HOST,
@@ -32,6 +46,7 @@ const smtpConfig = {
 let sites = [];
 const timers = new Map();
 const activeChecks = new Set();
+const mutationHits = new Map();
 
 await ensureDataFile();
 sites = await readSites();
@@ -44,14 +59,20 @@ const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, `http://${req.headers.host}`);
 
     if (url.pathname.startsWith("/api/")) {
-    await handleApi(req, res, url);
+      if (!authorizeApi(req, res)) return;
+      if (isMutation(req) && !checkMutationRateLimit(req, res)) return;
+      await handleApi(req, res, url);
       return;
     }
 
     await serveStatic(req, res, url);
   } catch (error) {
     console.error(error);
-    sendJson(res, 500, { error: "Unexpected server error" });
+    if (error.name === "ValidationError") {
+      sendJson(res, 400, { error: error.message });
+    } else {
+      sendJson(res, 500, { error: "Unexpected server error" });
+    }
   }
 });
 
@@ -91,12 +112,63 @@ function stripEnvQuotes(value) {
   return value;
 }
 
+function validationError(message) {
+  const error = new Error(message);
+  error.name = "ValidationError";
+  return error;
+}
+
+function authorizeApi(req, res) {
+  if (!ADMIN_TOKEN) return true;
+  if (req.method === "GET" && !REQUIRE_AUTH_FOR_READS) return true;
+
+  const token = req.headers["x-admin-token"];
+  if (typeof token === "string" && safeEqual(token, ADMIN_TOKEN)) {
+    return true;
+  }
+
+  sendJson(res, 401, { error: "Admin token required" });
+  return false;
+}
+
+function safeEqual(left, right) {
+  const leftBuffer = Buffer.from(left);
+  const rightBuffer = Buffer.from(right);
+  return leftBuffer.length === rightBuffer.length && crypto.timingSafeEqual(leftBuffer, rightBuffer);
+}
+
+function isMutation(req) {
+  return !["GET", "HEAD", "OPTIONS"].includes(req.method);
+}
+
+function checkMutationRateLimit(req, res) {
+  const key = req.socket.remoteAddress || "unknown";
+  const now = Date.now();
+  const hits = (mutationHits.get(key) || []).filter((timestamp) => now - timestamp < MUTATION_LIMIT.windowMs);
+  hits.push(now);
+  mutationHits.set(key, hits);
+
+  if (hits.length > MUTATION_LIMIT.max) {
+    sendJson(res, 429, { error: "Too many changes. Please wait before trying again." });
+    return false;
+  }
+
+  return true;
+}
+
 async function handleApi(req, res, url) {
   if (req.method === "GET" && url.pathname === "/api/sites") {
     sendJson(res, 200, {
       sites: sites.map(toClientSite),
       smtpReady: isSmtpReady(),
-      defaultIntervalMs: DEFAULT_INTERVAL_MS
+      defaultIntervalMs: DEFAULT_INTERVAL_MS,
+      adminAuthEnabled: Boolean(ADMIN_TOKEN),
+      requireAuthForReads: REQUIRE_AUTH_FOR_READS,
+      allowedDomains: ALLOWED_DOMAINS,
+      maxSites: MAX_SITES,
+      minIntervalMs: MIN_INTERVAL_MS,
+      recoveryConfirmationChecks: RECOVERY_CONFIRMATION_CHECKS,
+      alertCooldownMs: ALERT_COOLDOWN_MS
     });
     return;
   }
@@ -108,8 +180,12 @@ async function handleApi(req, res, url) {
   }
 
   if (req.method === "POST" && url.pathname === "/api/sites") {
+    if (sites.length >= MAX_SITES) {
+      sendJson(res, 400, { error: `Monitor limit reached. MAX_SITES is ${MAX_SITES}.` });
+      return;
+    }
     const body = await readBody(req);
-    const site = normalizeSite(body);
+    const site = await normalizeSite(body);
     sites.push(site);
     await saveSites();
     scheduleSite(site, { immediate: true });
@@ -132,7 +208,7 @@ async function handleApi(req, res, url) {
 
   if (req.method === "PATCH" && !action) {
     const body = await readBody(req);
-    Object.assign(site, normalizeSiteUpdate(site, body));
+    Object.assign(site, await normalizeSiteUpdate(site, body));
     await saveSites();
     scheduleSite(site, { immediate: false });
     sendJson(res, 200, { site: toClientSite(site) });
@@ -191,8 +267,8 @@ async function serveStatic(req, res, url) {
   }
 }
 
-function normalizeSite(input) {
-  const url = cleanUrl(input.url);
+async function normalizeSite(input) {
+  const url = await cleanUrl(input.url);
   const now = new Date().toISOString();
   return {
     id: crypto.randomUUID(),
@@ -212,15 +288,17 @@ function normalizeSite(input) {
     lastError: null,
     lastNotificationAt: null,
     acknowledgedAt: null,
+    consecutiveUpChecks: 0,
+    pendingRecoverySince: null,
     createdAt: now,
     updatedAt: now
   };
 }
 
-function normalizeSiteUpdate(site, input) {
+async function normalizeSiteUpdate(site, input) {
   const update = { updatedAt: new Date().toISOString() };
   if (input.name !== undefined) update.name = String(input.name).trim();
-  if (input.url !== undefined) update.url = cleanUrl(input.url);
+  if (input.url !== undefined) update.url = await cleanUrl(input.url);
   if (input.intervalMs !== undefined) update.intervalMs = clampInterval(input.intervalMs);
   if (input.maintenanceKeywords !== undefined) update.maintenanceKeywords = normalizeKeywords(input.maintenanceKeywords);
   if (input.expectedStatusMin !== undefined) update.expectedStatusMin = Number(input.expectedStatusMin);
@@ -235,10 +313,24 @@ function normalizeSiteUpdate(site, input) {
   return update;
 }
 
-function cleanUrl(value) {
-  const url = new URL(String(value || "").trim());
+async function cleanUrl(value) {
+  let url;
+  try {
+    url = new URL(String(value || "").trim());
+  } catch {
+    throw validationError("Enter a valid http or https URL");
+  }
   if (!["http:", "https:"].includes(url.protocol)) {
-    throw new Error("Only http and https URLs are supported");
+    throw validationError("Only http and https URLs are supported");
+  }
+  if (url.username || url.password) {
+    throw validationError("URLs with embedded credentials are not supported");
+  }
+  if (ALLOWED_DOMAINS.length && !isAllowedDomain(url.hostname)) {
+    throw validationError(`Hostname is not in ALLOWED_DOMAINS: ${url.hostname}`);
+  }
+  if (BLOCK_PRIVATE_NETWORKS) {
+    await assertPublicHostname(url.hostname);
   }
   return url.toString();
 }
@@ -258,17 +350,79 @@ function normalizeKeywords(value) {
     .filter(Boolean);
 }
 
+function parseCsv(value) {
+  return String(value)
+    .split(",")
+    .map((item) => item.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+function isAllowedDomain(hostname) {
+  const normalized = hostname.toLowerCase();
+  return ALLOWED_DOMAINS.some((domain) => normalized === domain || normalized.endsWith(`.${domain}`));
+}
+
+async function assertPublicHostname(hostname) {
+  if (net.isIP(hostname)) {
+    if (isPrivateAddress(hostname)) throw validationError("Private and local network addresses are blocked");
+    return;
+  }
+
+  const records = await dns.lookup(hostname, { all: true, verbatim: true });
+  if (!records.length) throw validationError("Hostname did not resolve");
+  if (records.some((record) => isPrivateAddress(record.address))) {
+    throw validationError("Hostnames resolving to private or local networks are blocked");
+  }
+}
+
+function isPrivateAddress(address) {
+  if (net.isIPv4(address)) return isPrivateIpv4(address);
+  if (net.isIPv6(address)) return isPrivateIpv6(address);
+  return true;
+}
+
+function isPrivateIpv4(address) {
+  const parts = address.split(".").map(Number);
+  const [a, b] = parts;
+  return a === 10
+    || a === 127
+    || (a === 169 && b === 254)
+    || (a === 172 && b >= 16 && b <= 31)
+    || (a === 192 && b === 168)
+    || (a === 100 && b >= 64 && b <= 127)
+    || a === 0;
+}
+
+function isPrivateIpv6(address) {
+  const normalized = address.toLowerCase();
+  return normalized === "::1"
+    || normalized.startsWith("fc")
+    || normalized.startsWith("fd")
+    || normalized.startsWith("fe80:")
+    || normalized === "::"
+    || normalized.startsWith("::ffff:127.")
+    || normalized.startsWith("::ffff:10.")
+    || normalized.startsWith("::ffff:192.168.");
+}
+
+function withJitter(ms) {
+  const jitter = Math.round(ms * 0.1);
+  return Math.max(MIN_INTERVAL_MS, ms + randomBetween(-jitter, jitter));
+}
+
+function randomBetween(min, max) {
+  return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+
 function scheduleSite(site, { immediate }) {
   clearSiteTimer(site.id);
   if (!site.enabled) return;
 
-  if (immediate) {
-    void runCheck(site);
-  }
-
-  const timer = setInterval(() => {
-    void runCheck(site);
-  }, site.intervalMs);
+  const delay = immediate ? randomBetween(1_000, 5_000) : withJitter(site.intervalMs);
+  const timer = setTimeout(async () => {
+    await runCheck(site);
+    scheduleSite(site, { immediate: false });
+  }, delay);
   timers.set(site.id, timer);
 }
 
@@ -288,16 +442,28 @@ async function runCheck(site, options = {}) {
   try {
     const result = await fetchSite(site);
     const nextStatus = classifyHealth(site, result);
+    const consecutiveUpChecks = nextStatus === "up" ? Number(site.consecutiveUpChecks || 0) + 1 : 0;
+    const pendingRecoverySince = nextStatus === "up" && previousStatus !== "up"
+      ? site.pendingRecoverySince || checkedAt
+      : nextStatus === "up"
+        ? site.pendingRecoverySince
+        : null;
+
     site.status = nextStatus;
     site.statusCode = result.statusCode;
     site.lastError = result.reason;
     site.lastCheckedAt = checkedAt;
+    site.consecutiveUpChecks = consecutiveUpChecks;
+    site.pendingRecoverySince = pendingRecoverySince;
     if (previousStatus !== nextStatus) site.lastChangedAt = checkedAt;
 
-    const recovered = nextStatus === "up" && ["maintenance", "down", "unknown"].includes(previousStatus);
+    const recovered = nextStatus === "up"
+      && pendingRecoverySince
+      && consecutiveUpChecks >= RECOVERY_CONFIRMATION_CHECKS;
     if (recovered && site.alertsEnabled && shouldNotify(site)) {
       await sendRecoveryEmail(site, result);
       site.lastNotificationAt = new Date().toISOString();
+      site.pendingRecoverySince = null;
       if (!site.notifyOnEveryRecovery) {
         site.alertsEnabled = false;
         site.acknowledgedAt = site.lastNotificationAt;
@@ -308,6 +474,8 @@ async function runCheck(site, options = {}) {
     site.statusCode = null;
     site.lastError = error.message;
     site.lastCheckedAt = checkedAt;
+    site.consecutiveUpChecks = 0;
+    site.pendingRecoverySince = null;
     if (previousStatus !== "down") site.lastChangedAt = checkedAt;
   } finally {
     site.updatedAt = new Date().toISOString();
@@ -328,13 +496,14 @@ async function fetchSite(site) {
       redirect: "follow",
       signal: controller.signal,
       headers: {
-        "User-Agent": "WebsiteHealthMonitor/0.1"
+        "Accept": "text/html,application/xhtml+xml,application/json;q=0.8,text/plain;q=0.7,*/*;q=0.1",
+        "User-Agent": CHECK_USER_AGENT
       }
     });
     const body = await response.text();
     return {
       statusCode: response.status,
-      body: body.slice(0, 250_000),
+      body: body.slice(0, MAX_RESPONSE_BYTES),
       reason: null
     };
   } finally {
@@ -353,7 +522,9 @@ function classifyHealth(site, result) {
 }
 
 function shouldNotify(site) {
-  return isSmtpReady() && (site.notifyOnEveryRecovery || !site.lastNotificationAt);
+  if (!isSmtpReady()) return false;
+  if (!site.lastNotificationAt) return true;
+  return site.notifyOnEveryRecovery && elapsedSince(site.lastNotificationAt) >= ALERT_COOLDOWN_MS;
 }
 
 async function sendRecoveryEmail(site, result) {
@@ -544,7 +715,7 @@ async function ensureDataFile() {
   try {
     await fs.access(DATA_FILE);
   } catch {
-    const starterSite = normalizeSite({
+    const starterSite = await normalizeSite({
       name: "LISD Canvas",
       url: "https://lisdtx.instructure.com/login/canvas",
       intervalMs: DEFAULT_INTERVAL_MS,
